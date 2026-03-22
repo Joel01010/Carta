@@ -1,14 +1,11 @@
 import 'dart:async';
+import '../core/powersync_connector.dart';
 
 /// Sync status enum representing local-first PowerSync states.
 enum SyncStatus { syncing, synced, offline }
 
-/// Stub service representing the PowerSync + Supabase local-first layer.
-///
-/// In production this would:
-///  - Initialize PowerSync with your Supabase endpoint
-///  - Monitor connectivity changes and DB sync events
-///  - Expose a reactive stream of SyncStatus
+/// Sync service — listens to real PowerSync status when available,
+/// falls back to a fake 2s timer in dev mode.
 class SyncService {
   SyncService._();
   static final SyncService instance = SyncService._();
@@ -16,24 +13,33 @@ class SyncService {
   final _statusController = StreamController<SyncStatus>.broadcast();
   SyncStatus _current = SyncStatus.syncing;
   Timer? _initTimer;
+  StreamSubscription? _psSubscription;
 
   Stream<SyncStatus> get statusStream => _statusController.stream;
   SyncStatus get currentStatus => _current;
 
-  /// Call once at app startup. Simulates a 2-second handshake then goes synced.
+  /// Call once at app startup.
   void init() {
-    // Cancel any previous timer to avoid duplicates
     _initTimer?.cancel();
-    _initTimer = Timer(const Duration(seconds: 2), () {
-      _emit(SyncStatus.synced);
-    });
+
+    try {
+      // Try to listen to real PowerSync status
+      _psSubscription = powersyncDatabase.statusStream.listen((status) {
+        if (status.connected) {
+          _emit(SyncStatus.synced);
+        } else if (status.downloading || status.uploading) {
+          _emit(SyncStatus.syncing);
+        } else {
+          _emit(SyncStatus.offline);
+        }
+      });
+    } catch (_) {
+      // PowerSync not initialised — fall back to fake timer
+      _initTimer = Timer(const Duration(seconds: 2), () {
+        _emit(SyncStatus.synced);
+      });
+    }
   }
-
-  /// Simulate going offline.
-  void simulateOffline() => _emit(SyncStatus.offline);
-
-  /// Simulate coming back online.
-  void simulateOnline() => _emit(SyncStatus.synced);
 
   void _emit(SyncStatus status) {
     _current = status;
@@ -44,6 +50,7 @@ class SyncService {
 
   void dispose() {
     _initTimer?.cancel();
+    _psSubscription?.cancel();
     _statusController.close();
   }
 }

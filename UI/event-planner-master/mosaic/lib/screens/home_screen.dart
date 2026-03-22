@@ -3,11 +3,16 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme/app_theme.dart';
 import '../services/sync_service.dart';
+import '../services/carta_api_service.dart';
+import '../services/supabase_write_service.dart';
+import '../core/supabase_connector.dart';
+import '../models/chat_response.dart';
 import '../widgets/neon_voice_orb.dart';
 import '../widgets/itinerary_card.dart';
 import '../widgets/timeline_route_widget.dart';
 import '../widgets/local_sync_indicator.dart';
 import '../widgets/glass_input_bar.dart';
+import '../widgets/itinerary_bottom_sheet.dart';
 
 // ---------------------------------------------------------------------------
 // Chat message model
@@ -23,52 +28,10 @@ class ChatMessage {
 }
 
 // ---------------------------------------------------------------------------
-// Sample itinerary data
-// ---------------------------------------------------------------------------
-const _sampleItems = [
-  ItineraryItem(
-    emoji: '🍔',
-    title: 'Dinner at The Neon Diner',
-    time: '7:00 PM',
-    location: 'Downtown Arts District',
-    isVerified: false,
-    isSynced: true,
-    category: 'food',
-  ),
-  ItineraryItem(
-    emoji: '🎟️',
-    title: 'Indie Night Live — The Groove Collective',
-    time: '9:00 PM',
-    location: 'Pulse Arena · Floor B',
-    isVerified: true,
-    isSynced: true,
-    category: 'music',
-  ),
-  ItineraryItem(
-    emoji: '🍸',
-    title: 'After-hours at Sky Lounge',
-    time: '11:30 PM',
-    location: 'Rooftop, 24th Floor',
-    isVerified: true,
-    isSynced: false,
-    category: 'nightlife',
-  ),
-  ItineraryItem(
-    emoji: '🏞️',
-    title: 'Morning Hike at Sunset Ridge',
-    time: '8:00 AM',
-    location: 'Sunset Ridge Trail',
-    isVerified: false,
-    isSynced: true,
-    category: 'outdoor',
-  ),
-];
-
-// ---------------------------------------------------------------------------
 // Filter options
 // ---------------------------------------------------------------------------
-const _filterOptions = ['All', 'Food 🍔', 'Music 🎵', 'Nightlife 🍸', 'Outdoor 🏞️'];
-const _filterKeys = ['all', 'food', 'music', 'nightlife', 'outdoor'];
+const _filterOptions = ['All', 'Meal 🍽️', 'Event 🎭', 'Drinks 🍹'];
+const _filterKeys = ['all', 'meal', 'event', 'drinks'];
 
 // ---------------------------------------------------------------------------
 // HomeScreen
@@ -81,39 +44,12 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  bool _isListening = false;
+  bool _isLoading = false;
   String _activeFilter = 'all';
   bool _isDragOver = false;
 
-  final List<ItineraryItem> _dailyPlanItems = [
-    const ItineraryItem(
-      emoji: '🍔',
-      title: 'Dinner at The Neon Diner',
-      time: '7:00 PM',
-      location: 'Downtown Arts District',
-      isVerified: false,
-      isSynced: true,
-      category: 'food',
-    ),
-    const ItineraryItem(
-      emoji: '🎟️',
-      title: 'Indie Night Live — The Groove Collective',
-      time: '9:00 PM',
-      location: 'Pulse Arena · Floor B',
-      isVerified: true,
-      isSynced: true,
-      category: 'music',
-    ),
-    const ItineraryItem(
-      emoji: '🍸',
-      title: 'After-hours at Sky Lounge',
-      time: '11:30 PM',
-      location: 'Rooftop, 24th Floor',
-      isVerified: true,
-      isSynced: false,
-      category: 'nightlife',
-    ),
-  ];
+  ItineraryModel? _currentItinerary;
+  final List<ItineraryItem> _dailyPlanItems = [];
 
   final List<ChatMessage> _messages = [
     ChatMessage(
@@ -122,10 +58,7 @@ class _HomeScreenState extends State<HomeScreen> {
     ),
   ];
 
-  List<ItineraryItem> get _filteredItems {
-    if (_activeFilter == 'all') return _sampleItems;
-    return _sampleItems.where((e) => e.category == _activeFilter).toList();
-  }
+  String get _userId => currentUserId ?? 'dev-user';
 
   @override
   void initState() {
@@ -133,33 +66,112 @@ class _HomeScreenState extends State<HomeScreen> {
     SyncService.instance.init();
   }
 
-  void _toggleListening() {
-    setState(() => _isListening = !_isListening);
-    HapticFeedback.mediumImpact();
-  }
-
-  void _onMessageSubmitted(String text) {
+  // ── Send message to real backend ────────────────────────────────────────
+  Future<void> _onMessageSubmitted(String text) async {
     setState(() {
       _messages.add(ChatMessage(text: text, role: MessageRole.user));
+      _isLoading = true;
     });
-    Future.delayed(const Duration(milliseconds: 800), () {
+
+    try {
+      final response = await CartaApiService.instance.sendChat(
+        userId: _userId,
+        message: text,
+        previousItinerary: _currentItinerary?.toJson(),
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _isLoading = false;
+        _messages.add(ChatMessage(text: response.reply, role: MessageRole.ai));
+      });
+
+      // If we got an itinerary, show the bottom sheet
+      if (response.itinerary != null) {
+        _currentItinerary = response.itinerary;
+        _showItinerarySheet(response.itinerary!);
+      }
+    } on CartaApiException catch (e) {
       if (!mounted) return;
       setState(() {
-        _messages.add(ChatMessage(text: _getAiResponse(text), role: MessageRole.ai));
+        _isLoading = false;
+        _messages.add(ChatMessage(
+          text: "Sorry, I couldn't connect right now. Please try again.",
+          role: MessageRole.ai,
+        ));
       });
-    });
+      _showSnackbar(e.message);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _messages.add(ChatMessage(
+          text: "Something went wrong. Let's try again!",
+          role: MessageRole.ai,
+        ));
+      });
+      _showSnackbar("Carta couldn't connect. Try again.");
+    }
   }
 
-  String _getAiResponse(String input) {
-    final lower = input.toLowerCase();
-    if (lower.contains('dinner') || lower.contains('food') || lower.contains('eat')) {
-      return "Great choice! 🍔 The Neon Diner is trending this weekend. I've saved a spot for 7 PM — want me to add it to your plan?";
-    } else if (lower.contains('ticket') || lower.contains('event') || lower.contains('concert')) {
-      return "🎟️ I found verified tickets for Indie Night Live at Pulse Arena. 100% authentic — shall I lock them in?";
-    } else if (lower.contains('bar') || lower.contains('drink') || lower.contains('lounge')) {
-      return '🍸 Sky Lounge is the perfect after-spot! Rooftop views, live DJ. Shall I add it?';
+  void _showItinerarySheet(ItineraryModel itinerary) {
+    ItineraryBottomSheet.show(
+      context,
+      itinerary: itinerary,
+      onSave: () => _saveItinerary(itinerary),
+      onRegenerate: _regenerate,
+    );
+  }
+
+  Future<void> _saveItinerary(ItineraryModel itinerary) async {
+    final id = await SupabaseWriteService.instance.saveItinerary(_userId, itinerary);
+    if (id != null) {
+      _showSnackbar('Plan saved! ✨');
+      // Update daily plan items from the itinerary
+      setState(() {
+        _dailyPlanItems.clear();
+        _dailyPlanItems.addAll(itinerary.stops.map((s) => ItineraryItem(
+              emoji: s.emoji,
+              title: s.name,
+              time: s.time,
+              location: s.address ?? '',
+              isSynced: true,
+              category: s.stopType,
+            )));
+      });
+    } else {
+      _showSnackbar('Could not save plan');
     }
-    return "I'm on it! ✨ Let me scan the best options for your weekend. Check the Events Hub below!";
+  }
+
+  void _regenerate() {
+    _onMessageSubmitted('Regenerate this plan with different options');
+  }
+
+  void _showSnackbar(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: AppColors.surface,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  List<ItineraryItem> get _filteredItems {
+    if (_currentItinerary == null) return [];
+    final items = _currentItinerary!.stops.map((s) => ItineraryItem(
+          emoji: s.emoji,
+          title: s.name,
+          time: s.time,
+          location: s.address ?? '',
+          isSynced: true,
+          category: s.stopType,
+        ));
+    if (_activeFilter == 'all') return items.toList();
+    return items.where((e) => e.category == _activeFilter).toList();
   }
 
   @override
@@ -204,9 +216,7 @@ class _HomeScreenState extends State<HomeScreen> {
           RichText(
             text: TextSpan(
               style: GoogleFonts.outfit(
-                  fontSize: 26,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: -0.5),
+                  fontSize: 26, fontWeight: FontWeight.w800, letterSpacing: -0.5),
               children: const [
                 TextSpan(text: 'Car', style: TextStyle(color: AppColors.neonBlue)),
                 TextSpan(text: 'ta', style: TextStyle(color: AppColors.deepBlue)),
@@ -227,38 +237,33 @@ class _HomeScreenState extends State<HomeScreen> {
         Text("Your city, mapped for you.",
             textAlign: TextAlign.center,
             style: GoogleFonts.outfit(
-              fontSize: 22,
-              fontWeight: FontWeight.w700,
-              color: AppColors.textPrimary,
-            )),
+              fontSize: 22, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
         const SizedBox(height: 6),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 48),
           child: Text(
-            "I've mapped out some weekend ideas based on your taste. Where should we start?",
+            "Tell me what you're in the mood for and I'll build your perfect plan.",
             textAlign: TextAlign.center,
-            style: GoogleFonts.outfit(
-                fontSize: 13, color: AppColors.textSecondary, height: 1.55),
+            style: GoogleFonts.outfit(fontSize: 13, color: AppColors.textSecondary, height: 1.55),
           ),
         ),
         const SizedBox(height: 28),
-        NeonVoiceOrb(isListening: _isListening, onTap: _toggleListening),
+        NeonVoiceOrb(isListening: _isLoading, onTap: () => HapticFeedback.mediumImpact()),
         const SizedBox(height: 14),
         AnimatedSwitcher(
           duration: const Duration(milliseconds: 300),
-          child: _isListening
-              ? Text('Listening…',
-                  key: const ValueKey('listening'),
+          child: _isLoading
+              ? Text('Carta is planning…',
+                  key: const ValueKey('loading'),
                   style: GoogleFonts.outfit(
                     color: AppColors.neonBlue,
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
                     letterSpacing: 1.5,
                   ))
-              : Text('Tap orb to speak',
+              : Text('Type below to start',
                   key: const ValueKey('idle'),
-                  style: GoogleFonts.outfit(
-                      color: AppColors.textSecondary, fontSize: 13)),
+                  style: GoogleFonts.outfit(color: AppColors.textSecondary, fontSize: 13)),
         ),
       ]),
     );
@@ -271,11 +276,9 @@ class _HomeScreenState extends State<HomeScreen> {
         padding: const EdgeInsets.fromLTRB(22, 0, 22, 12),
         child: Row(children: [
           Container(
-              width: 3,
-              height: 16,
+              width: 3, height: 16,
               decoration: BoxDecoration(
-                  color: AppColors.neonBlue,
-                  borderRadius: BorderRadius.circular(2))),
+                  color: AppColors.neonBlue, borderRadius: BorderRadius.circular(2))),
           const SizedBox(width: 8),
           Text('Chat with Carta',
               style: GoogleFonts.outfit(
@@ -291,6 +294,23 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
             children: _messages.map((msg) => _ChatBubble(message: msg)).toList()),
       ),
+      if (_isLoading)
+        Padding(
+          padding: const EdgeInsets.only(left: 56, top: 4),
+          child: Row(children: [
+            SizedBox(
+              width: 16, height: 16,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: AppColors.neonBlue.withValues(alpha: 0.6),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text('Carta is thinking…',
+                style: GoogleFonts.outfit(
+                    color: AppColors.textSecondary, fontSize: 12, fontStyle: FontStyle.italic)),
+          ]),
+        ),
     ]);
   }
 
@@ -305,32 +325,26 @@ class _HomeScreenState extends State<HomeScreen> {
             Expanded(
               child: Row(children: [
                 Container(
-                    width: 3,
-                    height: 18,
+                    width: 3, height: 18,
                     decoration: BoxDecoration(
-                        color: AppColors.neonBlue,
-                        borderRadius: BorderRadius.circular(2))),
+                        color: AppColors.neonBlue, borderRadius: BorderRadius.circular(2))),
                 const SizedBox(width: 8),
                 Text('Events Hub',
                     style: GoogleFonts.outfit(
-                      color: AppColors.textPrimary,
-                      fontSize: 20,
-                      fontWeight: FontWeight.w700,
-                    )),
+                      color: AppColors.textPrimary, fontSize: 20, fontWeight: FontWeight.w700)),
               ]),
             ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-              decoration: BoxDecoration(
-                gradient: AppGradients.primary,
-                borderRadius: BorderRadius.circular(14),
+            if (_currentItinerary != null)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                decoration: BoxDecoration(
+                  gradient: AppGradients.primary,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Text('₹${_currentItinerary!.totalCostEstimate}',
+                    style: GoogleFonts.outfit(
+                        color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600)),
               ),
-              child: Text('This Weekend',
-                  style: GoogleFonts.outfit(
-                      color: Colors.white,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600)),
-            ),
           ],
         ),
       ),
@@ -358,15 +372,11 @@ class _HomeScreenState extends State<HomeScreen> {
                       : AppColors.surfaceBorder,
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                    color: isActive
-                        ? AppColors.neonBlue
-                        : Colors.transparent,
+                    color: isActive ? AppColors.neonBlue : Colors.transparent,
                     width: 1.5,
                   ),
                   boxShadow: isActive
-                      ? [BoxShadow(
-                            color: AppColors.neonBlue.withValues(alpha: 0.3),
-                            blurRadius: 8)]
+                      ? [BoxShadow(color: AppColors.neonBlue.withValues(alpha: 0.3), blurRadius: 8)]
                       : [],
                 ),
                 child: Text(label,
@@ -383,20 +393,22 @@ class _HomeScreenState extends State<HomeScreen> {
 
       const SizedBox(height: 14),
 
-      // Horizontal event cards
+      // Horizontal event cards (from itinerary or empty)
       SizedBox(
         height: 220,
         child: _filteredItems.isEmpty
             ? Center(
-                child: Text('No events in this category',
-                    style: GoogleFonts.outfit(
-                        color: AppColors.textSecondary, fontSize: 13)))
+                child: Text(
+                  _currentItinerary == null
+                      ? 'Ask Carta to plan your weekend ✨'
+                      : 'No stops in this category',
+                  style: GoogleFonts.outfit(color: AppColors.textSecondary, fontSize: 13),
+                ))
             : ListView.builder(
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.only(left: 20, right: 8),
                 itemCount: _filteredItems.length,
-                itemBuilder: (ctx, i) =>
-                    ItineraryCard(item: _filteredItems[i]),
+                itemBuilder: (ctx, i) => ItineraryCard(item: _filteredItems[i]),
               ),
       ),
 
@@ -424,24 +436,19 @@ class _HomeScreenState extends State<HomeScreen> {
         padding: const EdgeInsets.fromLTRB(22, 0, 22, 6),
         child: Row(children: [
           Container(
-              width: 3,
-              height: 18,
+              width: 3, height: 18,
               decoration: BoxDecoration(
-                  color: AppColors.deepBlue,
-                  borderRadius: BorderRadius.circular(2))),
+                  color: AppColors.deepBlue, borderRadius: BorderRadius.circular(2))),
           const SizedBox(width: 8),
           Text('Daily Plan',
               style: GoogleFonts.outfit(
-                color: AppColors.textPrimary,
-                fontSize: 18,
-                fontWeight: FontWeight.w700,
-              )),
+                color: AppColors.textPrimary, fontSize: 18, fontWeight: FontWeight.w700)),
           const SizedBox(width: 8),
           Flexible(
-            child: Text('— drag events here',
+            child: Text(
+                _dailyPlanItems.isEmpty ? '— save a plan to see it here' : '— drag events here',
                 overflow: TextOverflow.ellipsis,
-                style: GoogleFonts.outfit(
-                    color: AppColors.textSecondary, fontSize: 11)),
+                style: GoogleFonts.outfit(color: AppColors.textSecondary, fontSize: 11)),
           ),
         ]),
       ),
@@ -470,34 +477,32 @@ class _HomeScreenState extends State<HomeScreen> {
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(16),
               border: _isDragOver
-                  ? Border.all(
-                      color: AppColors.neonBlue.withValues(alpha: 0.6),
-                      width: 1.5)
+                  ? Border.all(color: AppColors.neonBlue.withValues(alpha: 0.6), width: 1.5)
                   : null,
-              color: _isDragOver
-                  ? AppColors.neonBlue.withValues(alpha: 0.05)
-                  : Colors.transparent,
+              color: _isDragOver ? AppColors.neonBlue.withValues(alpha: 0.05) : Colors.transparent,
             ),
             child: Column(children: [
               if (_isDragOver)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 8),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(Icons.add_circle_outline,
-                          color: AppColors.neonBlue, size: 16),
-                      const SizedBox(width: 6),
-                      Text('Drop to add to Daily Plan',
-                          style: GoogleFonts.outfit(
-                            color: AppColors.neonBlue,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                          )),
-                    ],
+                  child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    const Icon(Icons.add_circle_outline, color: AppColors.neonBlue, size: 16),
+                    const SizedBox(width: 6),
+                    Text('Drop to add to Daily Plan',
+                        style: GoogleFonts.outfit(
+                          color: AppColors.neonBlue, fontSize: 12, fontWeight: FontWeight.w600)),
+                  ]),
+                ),
+              if (_dailyPlanItems.isNotEmpty)
+                TimelineRouteWidget(items: _dailyPlanItems)
+              else
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 20),
+                  child: Center(
+                    child: Text('No stops yet',
+                        style: GoogleFonts.outfit(color: AppColors.textSecondary, fontSize: 13)),
                   ),
                 ),
-              TimelineRouteWidget(items: _dailyPlanItems),
             ]),
           );
         },
@@ -515,13 +520,13 @@ class _HomeScreenState extends State<HomeScreen> {
           colors: [Color(0x00000000), Color(0xFF000000)],
         ),
       ),
-      child: GlassInputBar(onSubmitted: _onMessageSubmitted),
+      child: GlassInputBar(onSubmitted: _isLoading ? null : _onMessageSubmitted),
     );
   }
 }
 
 // ---------------------------------------------------------------------------
-// Chat bubble — blue spectrum only
+// Chat bubble
 // ---------------------------------------------------------------------------
 class _ChatBubble extends StatelessWidget {
   final ChatMessage message;
@@ -534,30 +539,23 @@ class _ChatBubble extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Row(
-        mainAxisAlignment:
-            isAI ? MainAxisAlignment.start : MainAxisAlignment.end,
+        mainAxisAlignment: isAI ? MainAxisAlignment.start : MainAxisAlignment.end,
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           if (isAI) ...[
             Container(
-              width: 32,
-              height: 32,
+              width: 32, height: 32,
               margin: const EdgeInsets.only(right: 8, bottom: 2),
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 gradient: AppGradients.primaryReversed,
                 boxShadow: [
-                  BoxShadow(
-                      color: AppColors.neonBlue.withValues(alpha: 0.4),
-                      blurRadius: 8),
+                  BoxShadow(color: AppColors.neonBlue.withValues(alpha: 0.4), blurRadius: 8),
                 ],
               ),
               child: const Center(
                 child: Text('C',
-                    style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w700)),
+                    style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w700)),
               ),
             ),
           ],
@@ -584,32 +582,23 @@ class _ChatBubble extends StatelessWidget {
                   bottomLeft: Radius.circular(isAI ? 4 : 18),
                   bottomRight: Radius.circular(isAI ? 18 : 4),
                 ),
-                border: Border.all(
-                  color: AppColors.neonBlue.withValues(alpha: 0.20),
-                  width: 1,
-                ),
+                border: Border.all(color: AppColors.neonBlue.withValues(alpha: 0.20), width: 1),
               ),
               child: Text(message.text,
                   style: GoogleFonts.outfit(
-                    color: AppColors.textPrimary,
-                    fontSize: 13.5,
-                    height: 1.5,
-                  )),
+                    color: AppColors.textPrimary, fontSize: 13.5, height: 1.5)),
             ),
           ),
           if (!isAI) ...[
             Container(
-              width: 32,
-              height: 32,
+              width: 32, height: 32,
               margin: const EdgeInsets.only(left: 8, bottom: 2),
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: AppColors.surfaceBorder,
-                border: Border.all(
-                    color: AppColors.neonBlue.withValues(alpha: 0.3)),
+                border: Border.all(color: AppColors.neonBlue.withValues(alpha: 0.3)),
               ),
-              child: const Icon(Icons.person_rounded,
-                  color: AppColors.neonBlue, size: 18),
+              child: const Icon(Icons.person_rounded, color: AppColors.neonBlue, size: 18),
             ),
           ],
         ],
@@ -619,7 +608,7 @@ class _ChatBubble extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Background blobs — single blue blob, no pink
+// Background blobs
 // ---------------------------------------------------------------------------
 class _BackgroundBlobs extends StatelessWidget {
   const _BackgroundBlobs();
@@ -628,25 +617,19 @@ class _BackgroundBlobs extends StatelessWidget {
   Widget build(BuildContext context) {
     return Stack(children: [
       Positioned(
-        top: -80,
-        right: -60,
+        top: -80, right: -60,
         child: Container(
-          width: 280,
-          height: 280,
+          width: 280, height: 280,
           decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: AppColors.neonBlue.withValues(alpha: 0.05)),
+              shape: BoxShape.circle, color: AppColors.neonBlue.withValues(alpha: 0.05)),
         ),
       ),
       Positioned(
-        top: 350,
-        left: -80,
+        top: 350, left: -80,
         child: Container(
-          width: 240,
-          height: 240,
+          width: 240, height: 240,
           decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: AppColors.deepBlue.withValues(alpha: 0.04)),
+              shape: BoxShape.circle, color: AppColors.deepBlue.withValues(alpha: 0.04)),
         ),
       ),
     ]);

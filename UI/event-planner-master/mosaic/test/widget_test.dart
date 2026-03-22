@@ -1,17 +1,16 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:mosaic/main.dart';
 
 void main() {
   testWidgets('CartaApp renders MaterialApp', (WidgetTester tester) async {
-    // Phone-sized surface
     tester.view.physicalSize = const Size(1080, 1920);
     tester.view.devicePixelRatio = 3.0;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    // Suppress RenderFlex overflow exceptions — they show as yellow overflow
-    // stripes on device but throw in tests. This is safe for a smoke test.
+    // Suppress RenderFlex overflow paint exceptions in tests
     final originalOnError = FlutterError.onError;
     FlutterError.onError = (FlutterErrorDetails details) {
       final summary = details.summary.toString();

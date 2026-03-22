@@ -28,6 +28,7 @@ dependencies:
 
   # Network
   http: ^1.4.0
+  url_launcher: ^6.3.0
 
 dev_dependencies:
   flutter_test:

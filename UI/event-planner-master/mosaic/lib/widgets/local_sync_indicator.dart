@@ -46,57 +46,47 @@ class _LocalSyncIndicatorState extends State<LocalSyncIndicator>
         final pillColor = isSyncing ? AppColors.neonBlue : AppColors.offline;
         final label = isSyncing ? 'Syncing...' : 'Offline';
 
-        return GestureDetector(
-          onTap: () {
-            if (status == SyncStatus.offline) {
-              SyncService.instance.simulateOnline();
-            } else {
-              SyncService.instance.simulateOffline();
-            }
-          },
-          child: AnimatedBuilder(
-            animation: _pulseAnim,
-            builder: (context, _) {
-              final opacity = isSyncing ? _pulseAnim.value : 1.0;
-              return Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: pillColor.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                      color: pillColor.withValues(alpha: 0.4), width: 1),
-                  boxShadow: isSyncing
-                      ? [
-                          BoxShadow(
-                            color:
-                                AppColors.neonBlue.withValues(alpha: 0.3 * opacity),
-                            blurRadius: 10,
-                          )
-                        ]
-                      : [],
-                ),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: pillColor.withValues(alpha: opacity),
-                    ),
+        return AnimatedBuilder(
+          animation: _pulseAnim,
+          builder: (context, _) {
+            final opacity = isSyncing ? _pulseAnim.value : 1.0;
+            return Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: pillColor.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                    color: pillColor.withValues(alpha: 0.4), width: 1),
+                boxShadow: isSyncing
+                    ? [
+                        BoxShadow(
+                          color: AppColors.neonBlue
+                              .withValues(alpha: 0.3 * opacity),
+                          blurRadius: 10,
+                        )
+                      ]
+                    : [],
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: pillColor.withValues(alpha: opacity),
                   ),
-                  const SizedBox(width: 6),
-                  Text(label,
-                      style: TextStyle(
-                        color: pillColor,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: 0.3,
-                      )),
-                ]),
-              );
-            },
-          ),
+                ),
+                const SizedBox(width: 6),
+                Text(label,
+                    style: TextStyle(
+                      color: pillColor,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.3,
+                    )),
+              ]),
+            );
+          },
         );
       },
     );
