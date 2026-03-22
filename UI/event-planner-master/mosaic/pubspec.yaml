@@ -1,0 +1,38 @@
+name: mosaic
+description: "Carta — AI-Powered Local-First Weekend Planner"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.1.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  google_fonts: ^6.2.1
+  flutter_animate: ^4.5.0
+
+  # PowerSync + Supabase (offline-first sync)
+  powersync: ^1.8.2
+  path_provider: ^2.1.3
+  supabase_flutter: ^2.8.3
+
+  # Map (OSM tiles, no Google Maps)
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.1
+
+  # State management
+  flutter_riverpod: ^2.6.1
+
+  # Network
+  http: ^1.4.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

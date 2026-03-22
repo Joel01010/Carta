@@ -1,0 +1,41 @@
+# PowerSync Sync Rules
+# Configure these in the PowerSync Dashboard (sync_rules.yaml)
+# ---
+
+bucket_definitions:
+  # Bucket 1: User's own profile
+  user_data:
+    parameters:
+      - SELECT request.user_id() AS user_id
+    data:
+      - SELECT * FROM user_profiles WHERE user_id = bucket.user_id
+
+  # Bucket 2: User's itineraries (today and future only)
+  user_itineraries:
+    parameters:
+      - SELECT request.user_id() AS user_id
+    data:
+      - SELECT * FROM itineraries
+        WHERE user_id = bucket.user_id
+        AND date >= CURRENT_DATE
+
+      # Stops belonging to synced itineraries
+      - SELECT s.* FROM itinerary_stops s
+        INNER JOIN itineraries i ON s.itinerary_id = i.id
+        WHERE i.user_id = bucket.user_id
+        AND i.date >= CURRENT_DATE
+
+      # Cached places belonging to synced itineraries
+      - SELECT cp.* FROM cached_places cp
+        INNER JOIN itineraries i ON cp.itinerary_id = i.id
+        WHERE i.user_id = bucket.user_id
+        AND i.date >= CURRENT_DATE
+
+  # Bucket 3: User's bookings (last 7 days only)
+  user_bookings:
+    parameters:
+      - SELECT request.user_id() AS user_id
+    data:
+      - SELECT * FROM booking_status
+        WHERE user_id = bucket.user_id
+        AND created_at >= (CURRENT_DATE - INTERVAL '7 days')
