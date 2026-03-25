@@ -1,25 +1,26 @@
-"""Overpass API (OpenStreetMap) tool — finds nearby places for the map_scraper agent."""
+"""Overpass API (OpenStreetMap) tool — finds nearby places.
+
+Uses httpx async instead of synchronous overpy to avoid blocking the event loop.
+"""
 
 from __future__ import annotations
 
-import overpy
+import httpx
 from langchain_core.tools import tool
 
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Public Overpass API endpoint — no API key required
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
-# Map user-facing place_type values to OSM amenity / tourism tags
 _AMENITY_MAP: dict[str, str] = {
     "restaurant": "restaurant",
     "cafe": "cafe",
     "bar": "bar",
     "fuel": "fuel",
     "gas_station": "fuel",
-    "attraction": "attraction",       # handled via tourism tag below
+    "attraction": "attraction",
     "tourist_attraction": "attraction",
 }
 
@@ -39,47 +40,46 @@ async def find_nearby_places(
         lng: Longitude of the center point.
         place_type: Type of place — restaurant, cafe, bar, fuel, attraction.
         radius_meters: Search radius in meters (default 2000).
-        keyword: Optional keyword to narrow results by name (case-insensitive substring match).
+        keyword: Optional keyword to narrow results by name.
 
     Returns:
         List of dicts with name, address, lat, lng, type. Up to 6 results.
     """
     osm_tag = _AMENITY_MAP.get(place_type.lower(), place_type.lower())
 
-    # Build Overpass QL query
     if osm_tag == "attraction":
         query = f"""
-[out:json][timeout:15];
+[out:json][timeout:10];
 (
   node["tourism"="attraction"](around:{radius_meters},{lat},{lng});
   node["tourism"="museum"](around:{radius_meters},{lat},{lng});
-  node["tourism"="artwork"](around:{radius_meters},{lat},{lng});
+  node["tourism"="viewpoint"](around:{radius_meters},{lat},{lng});
 );
-out body 10;
+out body 6;
 """
     else:
         query = f"""
-[out:json][timeout:15];
+[out:json][timeout:10];
 node["amenity"="{osm_tag}"](around:{radius_meters},{lat},{lng});
-out body 10;
+out body 6;
 """
 
     try:
-        api = overpy.Overpass(url=OVERPASS_URL)
-        result = api.query(query)
-        nodes = result.nodes
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(OVERPASS_URL, data={"data": query})
+            resp.raise_for_status()
+            data = resp.json()
     except Exception as exc:
         logger.error("Overpass API error (place_type=%s): %s", place_type, exc)
         return []
 
     results: list[dict] = []
-    for node in nodes[:6]:
-        tags = node.tags
+    for element in data.get("elements", []):
+        tags = element.get("tags", {})
         name = tags.get("name", "")
         if not name:
-            continue  # Skip unnamed nodes
+            continue
 
-        # Apply keyword filter if provided
         if keyword and keyword.lower() not in name.lower():
             continue
 
@@ -90,22 +90,20 @@ out body 10;
         ]
         address = " ".join(p for p in address_parts if p).strip() or tags.get("addr:full", "")
 
-        results.append(
-            {
-                "name": name,
-                "address": address,
-                "lat": float(node.lat),
-                "lng": float(node.lon),
-                "type": osm_tag,
-                "source": "overpass",
-            }
-        )
+        results.append({
+            "name": name,
+            "address": address,
+            "lat": float(element.get("lat", 0)),
+            "lng": float(element.get("lon", 0)),
+            "type": osm_tag,
+            "source": "overpass",
+        })
 
         if len(results) >= 6:
             break
 
     logger.info(
-        "find_nearby_places (Overpass) returned %d results near (%.4f, %.4f) type=%s",
+        "find_nearby_places returned %d results near (%.4f, %.4f) type=%s",
         len(results), lat, lng, place_type,
     )
     return results

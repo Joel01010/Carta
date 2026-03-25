@@ -1,29 +1,37 @@
-"""Node 4: planner — Builds the final itinerary using Gemini 1.5 Pro."""
+"""Node 4: planner — Builds the final itinerary using Gemini with fallback chain.
+
+Uses gemini-2.5-flash (primary) → gemini-2.0-flash → gemini-2.0-flash-lite.
+Always generates a plan even with sparse data.
+Writes to Supabase in try/except — still returns itinerary if write fails.
+"""
 
 from __future__ import annotations
 
 import uuid
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-
 from app.config import get_settings
-from app.graph.state import GraphState, ItineraryOutput
+from app.graph.state import GraphState, ItineraryOutput, get_city_coords
 from app.db.queries import create_itinerary, create_itinerary_stops, create_cached_places
+from app.utils.gemini import invoke_with_fallback
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 SYSTEM_PROMPT = """\
-You are Carta, a knowledgeable local guide for {city}. You talk like a
+You are Carta, a hyper-local evening planner for Indian cities. You talk like a
 well-travelled friend recommending spots — warm, opinionated, and specific.
 Use "I've mapped out your evening" style language. Reference actual {city}
 landmarks and neighbourhoods naturally.
+
+Always generate a plan even if event/place data is sparse.
+Use your knowledge of the city's venues if tool data is empty.
 
 Build a complete itinerary from the available events and places below.
 
 RULES — follow every single one:
 1. Start with a MEAL stop BEFORE the main event.
 2. The EVENT is the centerpiece stop. Pick the best match from the events list.
+   If no events are provided, suggest a popular local event or activity.
 3. Add ONE after-stop (drinks or attraction) ONLY if budget allows.
 4. Add a FUEL stop ONLY if one was provided and the event is far from home.
 5. Respect ALL constraints: {constraints}
@@ -31,6 +39,7 @@ RULES — follow every single one:
 7. Each stop needs: time, stop_type (meal|event|drinks|fuel), name, address,
    lat, lng, cost_estimate, duration_mins, and optional notes.
 8. Provide a catchy title and a 1-2 sentence summary.
+9. Output MUST match the exact JSON schema provided.
 
 USER PROFILE:
 - City: {city}
@@ -60,8 +69,9 @@ Itinerary:
 
 
 def _format_events(events: list) -> str:
+    """Format events list for the planner prompt."""
     if not events:
-        return "No events found — suggest a general outing."
+        return "No events found — suggest a general outing using your city knowledge."
     lines = []
     for i, ev in enumerate(events, 1):
         lines.append(
@@ -72,6 +82,7 @@ def _format_events(events: list) -> str:
 
 
 def _format_places(places: list) -> str:
+    """Format places list for the planner prompt."""
     if not places:
         return "No specific places found — use your knowledge of the city."
     lines = []
@@ -84,14 +95,22 @@ def _format_places(places: list) -> str:
 
 
 async def planner(state: GraphState) -> dict:
-    """Generate the final itinerary, write it to Supabase, and compose the reply."""
-    settings = get_settings()
+    """Generate the final itinerary, write it to Supabase, and compose the reply.
+
+    Uses the Gemini model fallback chain for both itinerary generation and
+    reply composition.
+    """
     profile = state.get("user_profile") or {}
     intent = state.get("parsed_intent")
     events = state.get("events", [])
     places = state.get("places", [])
 
-    city = profile.get("city", "Chennai")
+    city = "Chennai"
+    if intent and intent.detected_city:
+        city = intent.detected_city
+    elif profile.get("city"):
+        city = profile["city"]
+
     cuisines = profile.get("preferred_cuisines", [])
     event_types = profile.get("liked_event_types", [])
     budget = intent.parsed_budget if intent else profile.get("budget_max", 2000)
@@ -111,19 +130,14 @@ async def planner(state: GraphState) -> dict:
         places_text=_format_places(places),
     )
 
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-pro",
-        google_api_key=settings.google_api_key,
-        temperature=0.7,
-    )
-    structured_llm = llm.with_structured_output(ItineraryOutput)
-
     try:
-        itinerary: ItineraryOutput = await structured_llm.ainvoke(
-            [
+        itinerary: ItineraryOutput = await invoke_with_fallback(
+            messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": state["user_message"]},
-            ]
+            ],
+            temperature=0.7,
+            structured_output=ItineraryOutput,
         )
     except Exception as exc:
         logger.error("Planner LLM error: %s", exc)
@@ -204,18 +218,13 @@ async def planner(state: GraphState) -> dict:
         logger.info("Persisted itinerary %s with %d stops", itinerary_id, len(stop_rows))
 
     except Exception as db_exc:
-        logger.error("Supabase write error: %s", db_exc)
+        logger.error("Supabase write error (non-fatal): %s", db_exc)
         # Continue — the itinerary was generated; DB write failure is non-fatal
 
     # ----- Generate conversational reply -----
     try:
-        reply_llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash",
-            google_api_key=settings.google_api_key,
-            temperature=0.8,
-        )
-        reply_result = await reply_llm.ainvoke(
-            [
+        reply_result = await invoke_with_fallback(
+            messages=[
                 {
                     "role": "system",
                     "content": REPLY_PROMPT.format(
@@ -225,9 +234,10 @@ async def planner(state: GraphState) -> dict:
                     ),
                 },
                 {"role": "user", "content": "Write the reply."},
-            ]
+            ],
+            temperature=0.8,
         )
-        reply_text = reply_result.content
+        reply_text = reply_result.content if hasattr(reply_result, 'content') else str(reply_result)
     except Exception as reply_exc:
         logger.error("Reply generation error: %s", reply_exc)
         reply_text = (

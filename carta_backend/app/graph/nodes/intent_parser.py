@@ -1,19 +1,22 @@
-"""Node 1: intent_parser — Extracts structured intent from natural language."""
+"""Node 1: intent_parser — Extracts structured intent from natural language.
+
+Uses Gemini with model fallback chain. Also detects the city from the user message.
+"""
 
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-
 from app.config import get_settings
-from app.graph.state import GraphState, ParsedIntent
+from app.graph.state import GraphState, ParsedIntent, CITY_COORDINATES
+from app.utils.gemini import invoke_with_fallback
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 SYSTEM_PROMPT = """\
-You are an intent parser for Carta, a hyper-local weekend planner app for Indian cities.
+You are an intent parser for Carta, a hyper-local evening planner app for Indian cities.
 
 Given the user's chat message and their stored profile, extract the following fields:
 - parsed_date: The date the user wants to go out (ISO format YYYY-MM-DD).
@@ -26,6 +29,11 @@ Given the user's chat message and their stored profile, extract the following fi
 - parsed_constraints: A list of dietary or preference constraints mentioned
   (e.g. ["vegetarian", "no alcohol", "family-friendly"]). Extract only
   explicit constraints; do not infer.
+- detected_city: The city the user wants to plan in. Look for explicit city
+  mentions in the message. If no city is mentioned, use their profile city: {city}.
+  Supported cities: Chennai, Mumbai, Delhi, Bangalore, Hyderabad, Kolkata, Pune,
+  Ahmedabad, Jaipur, Goa, Kochi, Coimbatore, Lucknow, Chandigarh, Indore,
+  Vizag, Mysore.
 
 User profile context:
 - City: {city}
@@ -43,35 +51,52 @@ def _next_saturday(today: date) -> date:
     return today + timedelta(days=days_ahead)
 
 
+def _detect_city(message: str, profile_city: str) -> str:
+    """Detect city from user message using keyword matching."""
+    msg_lower = message.lower()
+    for city_name in CITY_COORDINATES:
+        # Use word boundary matching to avoid partial matches
+        if re.search(rf'\b{re.escape(city_name)}\b', msg_lower):
+            return city_name.title()
+    return profile_city
+
+
 async def intent_parser(state: GraphState) -> dict:
-    """Parse the user's natural-language message into a structured intent."""
-    settings = get_settings()
+    """Parse the user's natural-language message into a structured intent.
+
+    Uses Gemini with model fallback chain. Falls back to sensible defaults
+    if all models fail.
+    """
     profile = state.get("user_profile") or {}
     today = date.today()
+    profile_city = profile.get("city", "Chennai")
+
+    # Quick city detection from message
+    detected_city = _detect_city(state.get("user_message", ""), profile_city)
 
     system = SYSTEM_PROMPT.format(
         today=today.isoformat(),
-        city=profile.get("city", "Chennai"),
+        city=detected_city,
         cuisines=", ".join(profile.get("preferred_cuisines", [])) or "not set",
         event_types=", ".join(profile.get("liked_event_types", [])) or "not set",
         budget_max=profile.get("budget_max", 2000),
     )
 
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",
-        google_api_key=settings.google_api_key,
-        temperature=0,
-    )
-    structured_llm = llm.with_structured_output(ParsedIntent)
-
     try:
-        parsed: ParsedIntent = await structured_llm.ainvoke(
-            [
+        parsed: ParsedIntent = await invoke_with_fallback(
+            messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": state["user_message"]},
-            ]
+            ],
+            temperature=0,
+            structured_output=ParsedIntent,
         )
-        logger.info("Parsed intent: %s", parsed.model_dump_json(indent=2))
+        # Override detected_city if LLM didn't detect one
+        if parsed.detected_city == "Chennai" and detected_city != "Chennai":
+            parsed.detected_city = detected_city
+
+        logger.info("Parsed intent: date=%s city=%s budget=%d",
+                     parsed.parsed_date, parsed.detected_city, parsed.parsed_budget)
         return {"parsed_intent": parsed}
 
     except Exception as exc:
@@ -82,5 +107,6 @@ async def intent_parser(state: GraphState) -> dict:
             parsed_time_of_day="evening",
             parsed_budget=profile.get("budget_max", 2000),
             parsed_constraints=[],
+            detected_city=detected_city,
         )
         return {"parsed_intent": fallback}

@@ -1,6 +1,14 @@
 """Tests for the LangGraph pipeline components."""
 
-from app.graph.state import ParsedIntent, EventResult, PlaceResult, ItineraryOutput, ItineraryStop
+from app.graph.state import (
+    ParsedIntent,
+    EventResult,
+    PlaceResult,
+    ItineraryOutput,
+    ItineraryStop,
+    get_city_coords,
+    CITY_COORDINATES,
+)
 
 
 def test_parsed_intent_defaults():
@@ -12,6 +20,18 @@ def test_parsed_intent_defaults():
     )
     assert intent.parsed_constraints == []
     assert intent.parsed_budget == 1500
+    assert intent.detected_city == "Chennai"
+
+
+def test_parsed_intent_with_city():
+    """ParsedIntent should accept a detected city."""
+    intent = ParsedIntent(
+        parsed_date="2026-03-28",
+        parsed_time_of_day="evening",
+        parsed_budget=1500,
+        detected_city="Mumbai",
+    )
+    assert intent.detected_city == "Mumbai"
 
 
 def test_event_result_serialization():
@@ -80,3 +100,24 @@ def test_itinerary_output_structure():
     assert len(itinerary.stops) == 2
     assert itinerary.stops[0].stop_type == "meal"
     assert itinerary.total_cost_estimate == 1400
+
+
+def test_city_coordinates_lookup():
+    """get_city_coords should return correct coordinates for known cities."""
+    lat, lng = get_city_coords("Chennai")
+    assert abs(lat - 13.0827) < 0.01
+    assert abs(lng - 80.2707) < 0.01
+
+    lat, lng = get_city_coords("Mumbai")
+    assert abs(lat - 19.0760) < 0.01
+
+    # Unknown city should default to Chennai
+    lat, lng = get_city_coords("UnknownCity")
+    assert abs(lat - 13.0827) < 0.01
+
+
+def test_city_coordinates_case_insensitive():
+    """get_city_coords should be case-insensitive."""
+    lat1, _ = get_city_coords("BANGALORE")
+    lat2, _ = get_city_coords("bangalore")
+    assert lat1 == lat2

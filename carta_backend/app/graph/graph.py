@@ -1,7 +1,10 @@
 """LangGraph StateGraph — wires all 5 nodes together.
 
 Flow:
-    intent_parser → parallel(event_search, map_scraper) → planner → profile_updater
+    START → intent_parser → fan-out [event_search, map_scraper] → join → planner → profile_updater → END
+
+Uses Annotated[List, operator.add] in GraphState for events and places
+so the parallel fan-out/fan-in works correctly.
 """
 
 from __future__ import annotations

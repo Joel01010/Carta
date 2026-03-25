@@ -1,4 +1,8 @@
-"""Node 2: event_search — Fetches events from PredictHQ and Ticketmaster."""
+"""Node 2: event_search — Fetches events from PredictHQ and Ticketmaster.
+
+Runs concurrently with map_scraper (Node 3). Skips API calls if keys are missing.
+Returns empty list on failure — never prevents the planner from running.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,7 @@ from typing import Any
 import httpx
 
 from app.config import get_settings
-from app.graph.state import GraphState, EventResult
+from app.graph.state import GraphState, EventResult, get_city_coords
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -26,6 +30,9 @@ PREDICTHQ_CATEGORY_MAP: dict[str, str] = {
     "sports": "sports",
     "exhibitions": "expos",
     "conferences": "conferences",
+    "stand-up": "performing-arts",
+    "workshops": "conferences",
+    "nightlife": "concerts",
 }
 
 
@@ -35,7 +42,7 @@ PREDICTHQ_CATEGORY_MAP: dict[str, str] = {
 
 async def _fetch_predicthq(
     client: httpx.AsyncClient,
-    settings,
+    api_key: str,
     lat: float,
     lng: float,
     date_str: str,
@@ -55,7 +62,7 @@ async def _fetch_predicthq(
         "limit": 8,
     }
 
-    headers = {"Authorization": f"Bearer {settings.predicthq_api_key}"}
+    headers = {"Authorization": f"Bearer {api_key}"}
 
     response = await client.get(PREDICTHQ_BASE_URL, params=params, headers=headers)
     response.raise_for_status()
@@ -69,21 +76,25 @@ async def _fetch_predicthq(
             lng_val = float(coords[0]) if coords[0] is not None else lng
 
             entities = ev.get("entities", [])
-            booking_url = entities[0].get("formatted_address", "") if entities else ""
-
-            start_time = ev.get("start", "")
+            venue_name = ""
+            venue_address = ""
+            for entity in entities:
+                if entity.get("type") == "venue":
+                    venue_name = entity.get("name", "")
+                    venue_address = entity.get("formatted_address", "")
+                    break
 
             results.append({
                 "id": str(ev.get("id", "")),
                 "name": ev.get("title", "Unknown Event"),
                 "type": ev.get("category", "general"),
-                "venue": ev.get("title", ""),
-                "address": booking_url,
+                "venue": venue_name or ev.get("title", ""),
+                "address": venue_address,
                 "lat": lat_val,
                 "lng": lng_val,
-                "start_time": start_time,
+                "start_time": ev.get("start", ""),
                 "price": 0,
-                "booking_url": booking_url,
+                "booking_url": "",
                 "source": "predicthq",
             })
         except Exception as parse_err:
@@ -99,14 +110,14 @@ async def _fetch_predicthq(
 
 async def _fetch_ticketmaster(
     client: httpx.AsyncClient,
-    settings,
+    api_key: str,
     lat: float,
     lng: float,
     date_str: str,
 ) -> list[dict[str, Any]]:
     """Fetch events from Ticketmaster Discovery API."""
     params: dict[str, Any] = {
-        "apikey": settings.ticketmaster_api_key,
+        "apikey": api_key,
         "latlong": f"{lat},{lng}",
         "radius": 15,
         "unit": "km",
@@ -169,14 +180,13 @@ async def _fetch_ticketmaster(
 # ---------------------------------------------------------------------------
 
 async def event_search(state: GraphState) -> dict:
-    """Search PredictHQ and Ticketmaster concurrently for events matching intent.
+    """Search PredictHQ and Ticketmaster concurrently for events.
 
-    Runs in parallel with map_scraper (Node 3).
-    - Both API calls are made concurrently via asyncio.gather().
-    - If one source fails, results from the other are still returned.
-    - Results are deduplicated by fuzzy name match (first 20 chars, lowercase).
-    - Sorted ascending by price (lowest cost first).
-    - Returns top 8 events that fit within the user's parsed_budget.
+    - Skips API calls if the corresponding key is missing.
+    - Runs both sources concurrently via asyncio.gather(return_exceptions=True).
+    - Deduplicates by fuzzy name match.
+    - Returns top 8 events sorted by price (lowest first).
+    - On total failure, returns empty list (planner still runs).
     """
     settings = get_settings()
     profile = state.get("user_profile") or {}
@@ -189,29 +199,45 @@ async def event_search(state: GraphState) -> dict:
     liked_types: list[str] = profile.get("liked_event_types", [])
     date_str: str = intent.parsed_date
 
-    # Use profile lat/lng if available; fall back to Chennai centre
-    lat: float = float(profile.get("lat", 13.0827))
-    lng: float = float(profile.get("lng", 80.2707))
+    # Get coordinates from detected city or profile
+    city = intent.detected_city if intent.detected_city else profile.get("city", "Chennai")
+    default_lat, default_lng = get_city_coords(city)
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        phq_task = _fetch_predicthq(client, settings, lat, lng, date_str, liked_types)
-        tm_task = _fetch_ticketmaster(client, settings, lat, lng, date_str)
+    lat: float = float(profile.get("home_lat") or default_lat)
+    lng: float = float(profile.get("home_lng") or default_lng)
 
-        phq_results, tm_results = await asyncio.gather(
-            phq_task, tm_task, return_exceptions=True
-        )
+    try:
+        tasks = []
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # Only call PredictHQ if key is configured
+            if settings.predicthq_api_key:
+                tasks.append(_fetch_predicthq(client, settings.predicthq_api_key, lat, lng, date_str, liked_types))
+            else:
+                logger.info("PredictHQ key not set — skipping.")
+                tasks.append(asyncio.coroutine(lambda: [])())
+
+            # Only call Ticketmaster if key is configured
+            if settings.ticketmaster_api_key:
+                tasks.append(_fetch_ticketmaster(client, settings.ticketmaster_api_key, lat, lng, date_str))
+            else:
+                logger.info("Ticketmaster key not set — skipping.")
+                tasks.append(asyncio.coroutine(lambda: [])())
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    except Exception as exc:
+        logger.error("event_search client error: %s", exc)
+        return {"events": []}
 
     # Collect whichever sources succeeded
     combined: list[dict[str, Any]] = []
-    if isinstance(phq_results, list):
-        combined.extend(phq_results)
-    else:
-        logger.error("PredictHQ fetch failed: %s", phq_results)
-
-    if isinstance(tm_results, list):
-        combined.extend(tm_results)
-    else:
-        logger.error("Ticketmaster fetch failed: %s", tm_results)
+    source_names = ["PredictHQ", "Ticketmaster"]
+    for i, result in enumerate(results):
+        if isinstance(result, list):
+            combined.extend(result)
+        elif isinstance(result, Exception):
+            logger.error("%s fetch failed: %s", source_names[i] if i < len(source_names) else "Unknown", result)
 
     # Deduplicate by first-20-chars of lowercased name
     seen: set[str] = set()
@@ -223,29 +249,16 @@ async def event_search(state: GraphState) -> dict:
             deduped.append(ev)
 
     # Sort ascending by price (cheapest first)
-    deduped.sort(key=lambda e: e["price"])
+    deduped.sort(key=lambda e: e.get("price", 0))
 
     # Build EventResult objects, filtering by budget
     events: list[EventResult] = []
+    budget = intent.parsed_budget if intent else 2000
     for ev in deduped:
-        if ev["price"] > intent.parsed_budget:
+        if ev.get("price", 0) > budget:
             continue
         try:
-            events.append(
-                EventResult(
-                    id=ev["id"],
-                    name=ev["name"],
-                    type=ev["type"],
-                    venue=ev["venue"],
-                    address=ev["address"],
-                    lat=ev["lat"],
-                    lng=ev["lng"],
-                    start_time=ev["start_time"],
-                    price=ev["price"],
-                    booking_url=ev["booking_url"],
-                    source=ev["source"],
-                )
-            )
+            events.append(EventResult(**ev))
         except Exception as model_err:
             logger.warning("Skipping event that failed model validation: %s", model_err)
 
@@ -253,7 +266,7 @@ async def event_search(state: GraphState) -> dict:
             break
 
     logger.info(
-        "event_search returned %d events for (%.4f, %.4f) on %s",
-        len(events), lat, lng, date_str,
+        "event_search returned %d events for %s (%.4f, %.4f) on %s",
+        len(events), city, lat, lng, date_str,
     )
     return {"events": events}

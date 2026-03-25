@@ -10,33 +10,37 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 class ChatRequest(BaseModel):
-    user_id: str
-    message: str
+    """Request body for the chat endpoint."""
+    user_id: str = Field(default="", description="Supabase auth user ID")
+    message: str = Field(default="", description="User's chat message")
     previous_itinerary: dict | None = None
 
 
 class ItineraryStopResponse(BaseModel):
-    time: str
-    stop_type: str
-    name: str
-    address: str
-    lat: float
-    lng: float
-    cost_estimate: int
-    duration_mins: int
+    """A single stop in the itinerary response."""
+    time: str = ""
+    stop_type: str = ""
+    name: str = ""
+    address: str = ""
+    lat: float = 0.0
+    lng: float = 0.0
+    cost_estimate: int = 0
+    duration_mins: int = 60
     notes: str | None = None
     external_url: str | None = None
 
 
 class ItineraryResponse(BaseModel):
-    title: str
-    date: str
-    total_cost_estimate: int
-    summary: str
-    stops: list[ItineraryStopResponse]
+    """Full itinerary in the chat response."""
+    title: str = ""
+    date: str = ""
+    total_cost_estimate: int = 0
+    summary: str = ""
+    stops: list[ItineraryStopResponse] = []
 
 
 class ChatResponse(BaseModel):
+    """Response body for the chat endpoint — always 200."""
     reply: str
     itinerary: ItineraryResponse | None = None
 
@@ -46,12 +50,14 @@ class ChatResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class RateRequest(BaseModel):
-    user_id: str
-    stop_id: str
-    rating: str = Field(pattern=r"^(liked|skipped)$")
+    """Request body for the rate endpoint."""
+    user_id: str = Field(default="", description="Supabase auth user ID")
+    stop_id: str = ""
+    rating: str = Field(default="", pattern=r"^(liked|skipped)$")
 
 
 class RateResponse(BaseModel):
+    """Response body for the rate endpoint."""
     success: bool
 
 
@@ -60,9 +66,10 @@ class RateResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class UserProfileResponse(BaseModel):
-    id: str
+    """Response body for the profile endpoint."""
+    id: str = ""
     user_id: str | None = None
-    city: str
+    city: str = "Chennai"
     preferred_cuisines: list[str] = []
     liked_event_types: list[str] = []
     budget_max: int = 2000
