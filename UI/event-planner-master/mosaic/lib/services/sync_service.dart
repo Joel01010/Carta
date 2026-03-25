@@ -5,7 +5,7 @@ import '../core/powersync_connector.dart';
 enum SyncStatus { syncing, synced, offline }
 
 /// Sync service — listens to real PowerSync status when available,
-/// falls back to a fake 2s timer in dev mode.
+/// falls back to a timer when PowerSync isn't initialized.
 class SyncService {
   SyncService._();
   static final SyncService instance = SyncService._();
@@ -22,8 +22,15 @@ class SyncService {
   void init() {
     _initTimer?.cancel();
 
+    if (!isPowerSyncReady) {
+      // PowerSync not available — emit synced after a short delay
+      _initTimer = Timer(const Duration(seconds: 2), () {
+        _emit(SyncStatus.synced);
+      });
+      return;
+    }
+
     try {
-      // Try to listen to real PowerSync status
       _psSubscription = powersyncDatabase.statusStream.listen((status) {
         if (status.connected) {
           _emit(SyncStatus.synced);
@@ -34,7 +41,6 @@ class SyncService {
         }
       });
     } catch (_) {
-      // PowerSync not initialised — fall back to fake timer
       _initTimer = Timer(const Duration(seconds: 2), () {
         _emit(SyncStatus.synced);
       });
