@@ -85,36 +85,42 @@ class _AuthGateState extends State<_AuthGate> {
   }
 
   Future<void> _checkAuth() async {
-    final userId = currentUserId;
-
-    if (userId == null) {
-      // Not signed in → login screen
-      setState(() {
-        _ready = true;
-        _step = _AuthStep.login;
-      });
-      return;
-    }
-
-    // Signed in — check if user has a profile
     try {
+      final userId = currentUserId;
+
+      if (userId == null) {
+        // Not signed in → login screen
+        if (mounted) {
+          setState(() {
+            _ready = true;
+            _step = _AuthStep.login;
+          });
+        }
+        return;
+      }
+
+      // Signed in — check if user has a profile
       final profile = await supabase
           .from('user_profiles')
           .select('id')
           .eq('user_id', userId)
           .maybeSingle();
 
-      setState(() {
-        _ready = true;
-        _step = profile != null ? _AuthStep.main : _AuthStep.onboarding;
-      });
+      if (mounted) {
+        setState(() {
+          _ready = true;
+          _step = profile != null ? _AuthStep.main : _AuthStep.onboarding;
+        });
+      }
     } catch (e) {
-      // If profile check fails (table doesn't exist yet, etc.), go to onboarding
-      debugPrint('Profile check error: $e');
-      setState(() {
-        _ready = true;
-        _step = _AuthStep.onboarding;
-      });
+      // If profile check or initialization fails, default to login to prevent infinite loading
+      debugPrint('Auth check error: $e');
+      if (mounted) {
+        setState(() {
+          _ready = true;
+          _step = _AuthStep.login;
+        });
+      }
     }
   }
 

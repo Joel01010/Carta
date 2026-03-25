@@ -27,6 +27,8 @@ Carta is a hyper-local evening planner that uses Gemini AI to create personalize
 
 ### Environment Variables
 
+> **⚠️ IMPORTANT:** All `.env` files are git-ignored to prevent leaking API keys and database credentials. When cloning or pulling this repository to a new machine, you **must** manually create these files.
+
 Create `carta_backend/.env`:
 
 ```env
@@ -107,6 +109,8 @@ python -m pytest tests/ -v
 - Android SDK or iOS toolchain
 
 ### Environment Variables
+
+> **⚠️ IMPORTANT:** The Flutter assets `.env` file is also git-ignored. You must create it locally to pass the `_isInitialized` check during app startup.
 
 Create `UI/event-planner-master/mosaic/assets/.env`:
 
