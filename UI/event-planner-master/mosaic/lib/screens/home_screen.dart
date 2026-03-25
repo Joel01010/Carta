@@ -58,7 +58,10 @@ class _HomeScreenState extends State<HomeScreen> {
     ),
   ];
 
-  String get _userId => currentUserId ?? 'dev-user';
+  /// userId from Supabase auth — NEVER hardcoded.
+  /// The auth gate in main.dart guarantees currentUserId is non-null
+  /// before the user reaches this screen.
+  String get _userId => currentUserId!;
 
   @override
   void initState() {
@@ -206,6 +209,18 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  void _clearChat() {
+    setState(() {
+      _messages.clear();
+      _messages.add(ChatMessage(
+        text: "Hey! I'm Carta 👋 Your city, mapped for you. What are we planning?",
+        role: MessageRole.ai,
+      ));
+      _currentItinerary = null;
+      _dailyPlanItems.clear();
+    });
+  }
+
   // ── Header ──────────────────────────────────────────────────────────────
   Widget _buildHeader() {
     return Padding(
@@ -223,7 +238,27 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
-          const LocalSyncIndicator(),
+          Row(children: [
+            if (_messages.length > 1)
+              GestureDetector(
+                onTap: _clearChat,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  margin: const EdgeInsets.only(right: 8),
+                  decoration: BoxDecoration(
+                    color: AppColors.surfaceBorder,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text('Clear',
+                      style: GoogleFonts.outfit(
+                        color: AppColors.textSecondary,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      )),
+                ),
+              ),
+            const LocalSyncIndicator(),
+          ]),
         ],
       ),
     );

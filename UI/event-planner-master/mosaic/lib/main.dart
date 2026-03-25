@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'theme/app_theme.dart';
 import 'core/supabase_connector.dart';
 import 'core/powersync_connector.dart';
@@ -8,6 +9,7 @@ import 'screens/home_screen.dart';
 import 'screens/plan_screen.dart';
 import 'screens/wallet_screen.dart';
 import 'screens/onboarding_screen.dart';
+import 'screens/login_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -19,14 +21,27 @@ void main() async {
     ),
   );
 
-  // Initialise Supabase + PowerSync if credentials are configured
-  if (AppConfig.supabaseUrl.isNotEmpty) {
+  // Load environment variables from assets/.env
+  try {
+    await dotenv.load(fileName: "assets/.env");
+  } catch (e) {
+    debugPrint('dotenv load failed (using defaults): $e');
+  }
+
+  // Initialise Supabase (required for auth)
+  if (AppConfig.supabaseUrl.isNotEmpty && AppConfig.supabaseAnonKey.isNotEmpty) {
     try {
       await initSupabase();
-      await initPowerSync();
     } catch (e) {
-      debugPrint('Init error (continuing without sync): $e');
+      debugPrint('Supabase init error: $e');
     }
+  }
+
+  // Initialise PowerSync (optional — app works without it)
+  try {
+    await initPowerSync();
+  } catch (e) {
+    debugPrint('PowerSync init error (continuing without sync): $e');
   }
 
   runApp(const CartaApp());
@@ -46,8 +61,12 @@ class CartaApp extends StatelessWidget {
   }
 }
 
-/// Auth gate — checks if user is logged in.
-/// If yes → main shell. If no → onboarding.
+/// Auth gate — routes user through login → onboarding → main shell.
+///
+/// Flow:
+///   1. No Supabase session → LoginScreen
+///   2. Session exists but no profile → OnboardingScreen
+///   3. Session + profile → MainShell
 class _AuthGate extends StatefulWidget {
   const _AuthGate();
 
@@ -57,7 +76,7 @@ class _AuthGate extends StatefulWidget {
 
 class _AuthGateState extends State<_AuthGate> {
   bool _ready = false;
-  bool _loggedIn = false;
+  _AuthStep _step = _AuthStep.login;
 
   @override
   void initState() {
@@ -66,25 +85,47 @@ class _AuthGateState extends State<_AuthGate> {
   }
 
   Future<void> _checkAuth() async {
-    // If Supabase is not configured, skip auth and go straight to home
-    if (AppConfig.supabaseUrl.isEmpty) {
+    final userId = currentUserId;
+
+    if (userId == null) {
+      // Not signed in → login screen
       setState(() {
         _ready = true;
-        _loggedIn = true; // bypass auth in dev mode
+        _step = _AuthStep.login;
       });
       return;
     }
 
-    // Check if already logged in
-    final user = currentUserId;
-    setState(() {
-      _ready = true;
-      _loggedIn = user != null;
-    });
+    // Signed in — check if user has a profile
+    try {
+      final profile = await supabase
+          .from('user_profiles')
+          .select('id')
+          .eq('user_id', userId)
+          .maybeSingle();
+
+      setState(() {
+        _ready = true;
+        _step = profile != null ? _AuthStep.main : _AuthStep.onboarding;
+      });
+    } catch (e) {
+      // If profile check fails (table doesn't exist yet, etc.), go to onboarding
+      debugPrint('Profile check error: $e');
+      setState(() {
+        _ready = true;
+        _step = _AuthStep.onboarding;
+      });
+    }
+  }
+
+  void _onLoginSuccess() {
+    // After login, re-check to decide onboarding vs main
+    setState(() => _ready = false);
+    _checkAuth();
   }
 
   void _onOnboardingComplete() {
-    setState(() => _loggedIn = true);
+    setState(() => _step = _AuthStep.main);
   }
 
   @override
@@ -96,13 +137,18 @@ class _AuthGateState extends State<_AuthGate> {
       );
     }
 
-    if (!_loggedIn) {
-      return OnboardingScreen(onComplete: _onOnboardingComplete);
+    switch (_step) {
+      case _AuthStep.login:
+        return LoginScreen(onLoginSuccess: _onLoginSuccess);
+      case _AuthStep.onboarding:
+        return OnboardingScreen(onComplete: _onOnboardingComplete);
+      case _AuthStep.main:
+        return const _MainShell();
     }
-
-    return const _MainShell();
   }
 }
+
+enum _AuthStep { login, onboarding, main }
 
 /// Bottom-nav tab shell with Chat, Plan, Wallet tabs.
 class _MainShell extends StatefulWidget {
